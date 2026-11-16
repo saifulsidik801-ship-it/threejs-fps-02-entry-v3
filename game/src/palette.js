@@ -2,9 +2,9 @@
 // (MAP + LOOK: lighting/materials in a chosen palette). Every module reads colours from here;
 // nothing hard-codes a hex. Palette: deep harbour teal + warm sand + one coral accent.
 export const PALETTE = {
-  skyTop: 0x2a4a5e,
-  skyBottom: 0xe8a35c,
-  fog: 0x1d3038,
+  skyTop: 0x274a66,
+  skyBottom: 0xf0903f,
+  fog: 0x6b4a38,
   ground: 0x3a3f42,
   groundLine: 0x2c3134,
   wallTeal: 0x1f4d54,

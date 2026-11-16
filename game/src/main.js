@@ -7,6 +7,7 @@
 import { WEAPONS } from './weapons.js';
 import { fireShot, tickReload, startReload, hasLOS, applyDamage } from './combat.js';
 import { BOT_NAMES, WAYPOINTS, ROUTES, pickPlan, makeBot, botBuy, tickBot, zoneOf, hearShot } from './bots.js';
+import { buildBotMesh, buildViewmodel, refreshBotGun, animateBot } from './models.js';
 import { buyMenu, buy, makeGunFor, START_MONEY } from './economy.js';
 import { startRound, startLive, endRound, tickRounds, checkElimination as checkElim } from './rounds.js';
 import { buildWorld, zoneAt, collide } from './world.js';
@@ -16,7 +17,6 @@ import { makeHud } from './hud.js';
 import { makeInput } from './input.js';
 import { makePlayer, tickPlayer, siteAt } from './player.js';
 import { createState, PHASE } from './state.js';
-import { PALETTE } from './palette.js';
 import { mulberry32, shuffle } from './rng.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { runTests } from './tests.js';
@@ -31,6 +31,8 @@ const state = createState(SEED);
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -75,43 +77,7 @@ ctx.radio = {
 ctx.hud = makeHud(ctx);
 
 // --- combatants: the human + 4 named teammates + 5 named defenders ---
-function nameSprite(name, color) {
-  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
-  const g = c.getContext('2d');
-  g.font = 'bold 30px system-ui, sans-serif'; g.textAlign = 'center';
-  g.fillStyle = 'rgba(0,0,0,0.55)'; g.fillRect(0, 6, 256, 44);
-  g.fillStyle = color; g.fillText(name, 128, 38);
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true }));
-  s.scale.set(2.4, 0.6, 1);
-  return s;
-}
-function buildBotMesh(bot) {
-  const col = bot.team === 'attack' ? PALETTE.teamAttack : PALETTE.teamDefend;
-  const grp = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.38, 1.05, 10),
-    new THREE.MeshStandardMaterial({ color: col, roughness: 0.7 }));
-  body.position.y = 0.85; body.userData = { owner: bot, part: 'body' };
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10),
-    new THREE.MeshStandardMaterial({ color: 0xd8b89a, roughness: 0.8 }));
-  head.position.y = 1.62; head.userData = { owner: bot, part: 'head' };
-  const helm = new THREE.Mesh(new THREE.SphereGeometry(0.27, 12, 8, 0, Math.PI * 2, 0, 1.2),
-    new THREE.MeshStandardMaterial({ color: 0x2c3134, roughness: 0.5 }));
-  helm.position.y = 1.66; helm.userData = { owner: bot, part: 'head' };
-  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.3),
-    new THREE.MeshStandardMaterial({ color: 0x232a2e, roughness: 0.9 }));
-  legs.position.y = 0.25; legs.userData = { owner: bot, part: 'leg' };
-  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.12, 0.9),
-    new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.4 }));
-  gun.position.set(0.3, 1.1, -0.3); gun.userData = { owner: bot, part: 'body' };
-  grp.add(body, head, helm, legs, gun);
-  const label = nameSprite(`${bot.name} · ${bot.role}`, bot.team === 'attack' ? '#ffb37a' : '#7ad0ff');
-  label.position.y = 2.15;
-  grp.add(label);
-  bot.hitMeshes = [body, head, helm, legs, gun];
-  bot.mesh = grp;
-  scene.add(grp);
-}
+// Bot meshes are built by models.js (articulated humanoids holding their guns).
 function spawnAll() {
   ctx.players.length = 0;
   const human = makePlayer();
@@ -120,13 +86,13 @@ function spawnAll() {
   BOT_NAMES.attack.forEach((def, i) => {
     const b = makeBot('attack', def, i, { x: -28 + i * 1.6, z: 16 - (i % 2) * 2 });
     b.gun = makeGunFor(botBuy(b, rng));
-    buildBotMesh(b);
+    buildBotMesh(b, scene);
     ctx.players.push(b);
   });
   BOT_NAMES.defend.forEach((def, i) => {
     const b = makeBot('defend', def, i, { x: 28 - i * 1.6, z: -16 + (i % 2) * 2 });
     b.gun = makeGunFor(botBuy(b, rng));
-    buildBotMesh(b);
+    buildBotMesh(b, scene);
     ctx.players.push(b);
   });
   // The human carries the charge on attack.
@@ -145,8 +111,8 @@ function resetPositions() {
     if (p.isBot) { p.route = []; p.routeIdx = 0; p.target = null; p.utilityUsed = false; }
     if (p.mesh) { p.mesh.visible = true; }
   });
-  // Bots re-buy every round with their wallets.
-  for (const p of ctx.players) if (p.isBot) { p.money += 0; p.gun = makeGunFor(botBuy(p, rng)); }
+  // Bots re-buy every round with their wallets; their held gun model follows.
+  for (const p of ctx.players) if (p.isBot) { p.money += 0; p.gun = makeGunFor(botBuy(p, rng)); refreshBotGun(p); }
   const human = ctx.players[0];
   human.gun = makeGunFor(human.weaponId);
   human.loadout = { 1: human.weaponId, 2: 'p9', 3: 'knife' };
@@ -158,17 +124,13 @@ function restartMatch() {
   startRound(ctx);
 }
 
-// --- viewmodel: a simple gun in the player's hands, built from boxes ---
-const vm = new THREE.Group();
-const vmBody = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.14, 0.62),
-  new THREE.MeshStandardMaterial({ color: 0x1c2126, roughness: 0.45, metalness: 0.4 }));
-const vmBarrel = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.3),
-  new THREE.MeshStandardMaterial({ color: 0x0e1113, roughness: 0.3, metalness: 0.6 }));
-vmBarrel.position.set(0, 0.03, -0.42);
-vm.add(vmBody, vmBarrel);
-vm.position.set(0.27, -0.27, -0.5);
-vm.scale.setScalar(0.45);
-vm.rotation.y = 0.12;
+// --- viewmodel: the player's gun in first person, built per weapon class ---
+// The same gun builder as the bots hold, plus gloved hands; rebuilt on weapon
+// switch in render() so the viewmodel always matches the equipped weapon.
+let vm = buildViewmodel('ar47');
+vm.position.set(0.26, -0.26, -0.45);
+vm.scale.setScalar(0.55);
+vm.rotation.y = 0.1;
 camera.add(vm);
 scene.add(camera);
 
@@ -286,14 +248,23 @@ function render() {
   camera.fov += (targetFov - camera.fov) * 0.2;
   camera.updateProjectionMatrix();
   vm.visible = cam === p && p.alive;
-  vm.position.z = -0.55 + (input.aiming ? 0.12 : 0);
+  if (vm.visible && vm.userData.weaponId !== p.weaponId) {
+    camera.remove(vm);
+    vm = buildViewmodel(p.weaponId);
+    vm.position.set(0.26, -0.26, -0.45);
+    vm.scale.setScalar(0.55);
+    vm.rotation.y = 0.1;
+    camera.add(vm);
+  }
+  vm.position.z = -0.45 + (input.aiming ? 0.1 : 0);
   for (const b of ctx.players) {
     if (!b.isBot || !b.mesh) continue;
     b.mesh.position.copy(b.pos);
     b.mesh.rotation.y = b.yaw;
     b.mesh.visible = b.alive;
-    // Walk bob; flash on hit.
-    b.mesh.position.y = b.moving ? Math.abs(Math.sin(state.time * 9)) * 0.05 : 0;
+    // Walk swing on the articulated limbs; flash on hit.
+    if (b.limbs) animateBot(b, state.time);
+    else b.mesh.position.y = b.moving ? Math.abs(Math.sin(state.time * 9)) * 0.05 : 0;
   }
   world.tick(state.time);
   effects.tick(1 / 60);
